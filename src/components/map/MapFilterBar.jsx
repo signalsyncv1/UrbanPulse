@@ -6,7 +6,7 @@ export function MapFilterBar() {
   const { activeFilter, setActiveFilter, detections, buses } = useUrbanPulse();
 
   const filters = [
-    { id: 'ALL', label: 'All Layers', icon: Layers, count: detections.length + buses.length },
+    { id: 'ALL', label: 'All Layers', icon: Layers, count: detections.length },
     { id: 'BUSES', label: 'Buses', icon: Bus, count: buses.length, color: 'text-blue-600' },
     { id: 'POTHOLES', label: 'Potholes', icon: Cone, count: detections.filter(d => d.type === 'pothole' || d.type === 'road_damage').length, color: 'text-amber-600' },
     { id: 'WATERLOGGING', label: 'Waterlogging', icon: Droplets, count: detections.filter(d => d.type === 'waterlogging').length, color: 'text-sky-600' },

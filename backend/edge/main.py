@@ -1,17 +1,17 @@
-"""Local demonstration previews.
-Central service receives events, not these streams.
-Now includes video upload + reset for per-camera live sources.
+"""Local demonstration previews. Central service receives events, not these streams.
+Includes video upload + reset for per-camera live sources, with auto-restart
+of the affected camera worker so new videos take effect immediately.
 """
 import asyncio
 import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query, UploadFile, File
+from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from edge.runtime import EdgeRuntime, load_config
+from edge.runtime import EdgeRuntime, load_config, CameraWorker
 
 runtime = None
 _cfg = None
@@ -39,6 +39,25 @@ def _ensure_backup(camera: str):
     bak = _backup_paths[camera]
     if not bak.exists() and src.exists():
         shutil.copy2(src, bak)
+
+
+def _restart_worker(camera: str):
+    """Stop and restart the camera worker so a newly uploaded video loads."""
+    global runtime
+    if runtime is None:
+        return False, "runtime not initialized"
+    try:
+        old = runtime.workers.get(camera)
+        if old is not None:
+            old.stop.set()
+            old.thread.join(timeout=6)
+        new_worker = CameraWorker(camera, runtime.config, runtime.outbox,
+                                  runtime.started, runtime.gps)
+        new_worker.thread.start()
+        runtime.workers[camera] = new_worker
+        return True, None
+    except Exception as exc:
+        return False, str(exc)
 
 
 @asynccontextmanager
@@ -118,14 +137,20 @@ def camera_config():
         }
     return out
 
+
 @app.post("/api/upload-video")
 async def upload_video(
     file: UploadFile = File(...),
-    camera: str = Query("road", pattern="^(road|traffic)$"),
+    camera: str = Query(None),
+    form_camera: str = Form(None),
 ):
-    """Replace the video used by the given camera.
-    Returns {ok, filename, frames, fps} to match the frontend contract.
+    """Replace the video used by the given camera and restart the worker.
+    Accepts camera from query string OR form body.
     """
+    camera = camera or form_camera or "road"
+    if camera not in ("road", "traffic"):
+        return {"ok": False, "error": f"Invalid camera: {camera}"}
+
     _ensure_backup(camera)
     target = _video_paths[camera]
 
@@ -157,6 +182,8 @@ async def upload_video(
     except Exception:
         pass
 
+    restarted, restart_err = _restart_worker(camera)
+
     return {
         "ok": True,
         "camera": camera,
@@ -165,20 +192,25 @@ async def upload_video(
         "path": str(target),
         "frames": frames,
         "fps": fps,
+        "worker_restarted": restarted,
+        "worker_restart_error": restart_err,
     }
+
 
 @app.post("/api/reset-video")
 def reset_video(camera: str = Query(..., pattern="^(road|traffic)$")):
-    """Restore the original demo video for the given camera."""
+    """Restore the original demo video and restart the worker."""
     bak = _backup_paths[camera]
     if not bak.exists():
-        raise HTTPException(
-            404, f"No backup exists for {camera}; nothing to reset to."
-        )
+        raise HTTPException(404, f"No backup exists for {camera}; nothing to reset to.")
     shutil.copy2(bak, _video_paths[camera])
+    restarted, restart_err = _restart_worker(camera)
     return {
+        "ok": True,
         "reset": True,
         "camera": camera,
         "restored_from": str(bak),
         "path": str(_video_paths[camera]),
+        "worker_restarted": restarted,
+        "worker_restart_error": restart_err,
     }

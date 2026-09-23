@@ -7,10 +7,13 @@ export async function readJson(url, options = {}) {
   return response.json();
 }
 
+
 export function eventToDetection(event) {
   const m = event.metadata || {};
   const road = event.camera_id === 'FRONT_CAMERA';
 
+  // Model classes are: crack, pothole, patch, other
+  // Map each to a distinct UI type so filters work
   const RAW_TO_TYPE = {
     crack: 'road_crack',
     pothole: 'pothole',
@@ -48,5 +51,6 @@ export function eventToDetection(event) {
     division: m.assigned_department?.division || (road ? 'Roads & Infrastructure' : 'Traffic Review'),
     deptId: m.assigned_department?.deptId || (road ? 'GCC-ROADS' : 'GCTP-ENFORCE'),
     observationCount: 1, observations: [],
-  };
+};
 }
+

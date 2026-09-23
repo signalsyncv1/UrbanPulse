@@ -51,3 +51,34 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Demo videos (large)
+demo/*.mp4
+backend/data/*.sqlite3*
+backend/data/*.bak
+backend/data/*.pre-*
+
+# Large data (never commit DBs)
+backend/data/*.sqlite3
+backend/data/*.sqlite3-journal
+backend/data/*.sqlite3-wal
+backend/data/*.sqlite3-shm
+backend/data/*.bak
+backend/data/*.pre-*
+backend/data/events.sqlite3.old-classes
+
+# Demo videos
+demo/*.mp4
+*.original.mp4
+*.uploading
+
+# Backups
+*.bak
+*.pre-*
+*.pre-donor
+*.pre-swap
+*.pre-autorestart
+
+# Evidence crops (regenerated per session)
+backend/data/evidence/
+backend/data/

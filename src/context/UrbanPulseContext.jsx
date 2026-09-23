@@ -32,7 +32,9 @@ function distanceInMeters(lat1, lng1, lat2, lng2) {
 
 export function UrbanPulseProvider({ children }) {
   const [buses, setBuses] = useState(CHENNAI_FLEET);
-  const [detections, setDetections] = useState(INITIAL_ALL_DETECTIONS.map(d => ({ ...d, title: `[SAMPLE] ${d.title}`, detectionSource: 'SEEDED_DEMO' })));
+  const [detections, setDetections] = useState(
+    INITIAL_ALL_DETECTIONS.map(d => ({ ...d, title: `[SAMPLE] ${d.title}`, detectionSource: 'SEEDED_DEMO' }))
+  );
   const [departments, setDepartments] = useState(DEPARTMENTS);
   const [simulationRunning, setSimulationRunning] = useState(false);
   const [selectedReport, setSelectedReport] = useState(null);
@@ -97,127 +99,125 @@ export function UrbanPulseProvider({ children }) {
   ]);
 
   const [centralConnection, setCentralConnection] = useState('connecting');
+
+  // ──────────────────────────────────────────────────────────────
+  // IMPORTANT: cursor and seen-set are IN-MEMORY ONLY.
+  // Previously persisted to localStorage, which caused every page
+  // reload to skip previously-seen events and show an empty map.
+  // On reload we now refetch from cursor 0 — the central backend
+  // dedups the events, and we dedup on the client by event_id.
+  // ──────────────────────────────────────────────────────────────
   const eventCursor = useRef(0);
   const seenEdgeEvents = useRef(new Set());
-  const recentNotifKeys = useRef([]);  // [{lat, lng, type, ts}] spatial+temporal dedup
 
-  // Central events are already deduplicated and geolocated at the edge.
-  // Do not pass them through the legacy random-bus/fallback-confidence builder.
   useEffect(() => {
     let cancelled = false, timer;
+
+    // Throttle: remember last time we created notifications from a poll cycle
+    let lastNotifTime = 0;
+    const NOTIF_COOLDOWN_MS = 5000;   // at most one batch of notif per 5s
+    const MAX_NOTIFS_PER_CYCLE = 3;    // at most 3 notifications per poll
+
     async function pollEvents() {
       try {
-        const page = await readJson(`${CENTRAL_URL}/api/events?after=${eventCursor.current}&limit=200`);
+        const page = await readJson(
+          `${CENTRAL_URL}/api/events?after=${eventCursor.current}&limit=200`
+        );
         if (cancelled) return;
-        const fresh = page.events.filter(e => !seenEdgeEvents.current.has(e.event_id));
-        fresh.forEach(e => seenEdgeEvents.current.add(e.event_id));
-        eventCursor.current = page.next_cursor;
+
+        const events = Array.isArray(page.events) ? page.events : [];
+        const fresh = events.filter((e) => !seenEdgeEvents.current.has(e.event_id));
+        fresh.forEach((e) => seenEdgeEvents.current.add(e.event_id));
+        if (typeof page.next_cursor === 'number') {
+          eventCursor.current = page.next_cursor;
+        } else {
+          eventCursor.current += events.length;
+        }
+
         if (fresh.length) {
           const records = fresh.map(eventToDetection).reverse();
-          setDetections(prev => {
-            const known = new Set(prev.map(d => d.id));
-            const newRecords = records.filter(d => !known.has(d.id));
+          setDetections((prev) => {
+            const known = new Set(prev.map((d) => d.id));
+            const newRecords = records.filter((d) => !known.has(d.id));
             return newRecords.length ? [...newRecords, ...prev] : prev;
           });
 
-          // ─── Spatial + temporal dedup ───────────────────────
-          // Skip a notification if a similar one (same type, within 200 m,
-          // within 5 min) was already shown. Cap at 3 per poll cycle.
-          const NOTIF_DEDUP_MS = 5 * 60 * 1000;
-          const NOTIF_DEDUP_RADIUS_M = 200;
-          const MAX_NOTIFS_PER_CYCLE = 3;
-          const nowMs = Date.now();
-          const notifsToAdd = [];
-
-          for (const d of records) {
-            if (typeof d.lat !== 'number' || typeof d.lng !== 'number') continue;
-
-            const dup = recentNotifKeys.current.find(k =>
-              k.type === d.type &&
-              (nowMs - k.ts) < NOTIF_DEDUP_MS &&
-              distanceInMeters(d.lat, d.lng, k.lat, k.lng) < NOTIF_DEDUP_RADIUS_M
-            );
-            if (dup) continue;
-
-            recentNotifKeys.current.push({
-              lat: d.lat, lng: d.lng, type: d.type, ts: nowMs
-            });
-
-            notifsToAdd.push({
-              id: `edge-${d.id}`, reportId: d.id, title: d.title,
+          // Only push notifications under strict conditions
+          const now = Date.now();
+          const cooldownOk = now - lastNotifTime >= NOTIF_COOLDOWN_MS;
+          if (cooldownOk) {
+            lastNotifTime = now;
+            const notifsToAdd = records.slice(0, MAX_NOTIFS_PER_CYCLE).map((d) => ({
+              id: `edge-${d.id}`,
+              reportId: d.id,
+              title: d.title,
               message:
-                `${d.busId} / ${d.cameraId} · ${new Date(d.timestamp).toLocaleTimeString()}` +
+                `${d.busId} / ${d.cameraId} · ${d.timestamp} · ${d.location}` +
                 (d.vehicleCount != null ? ` · Vehicles: ${d.vehicleCount}` : '') +
                 (d.trackId != null ? ` · Track #${d.trackId}` : ''),
               category: d.severity === 'CRITICAL' ? 'CRITICAL' : 'WARNING',
               time: new Date(d.timestamp).toLocaleTimeString(),
               timestamp: Date.parse(d.timestamp),
               unread: true,
-            });
-
-            if (notifsToAdd.length >= MAX_NOTIFS_PER_CYCLE) break;
+            }));
+            setNotifications((prev) => [...notifsToAdd, ...prev].slice(0, 15));
           }
-
-          recentNotifKeys.current = recentNotifKeys.current.filter(
-            k => nowMs - k.ts < NOTIF_DEDUP_MS
-          );
-
-          if (notifsToAdd.length) {
-            setNotifications(prev => [...notifsToAdd, ...prev].slice(0, 15));
-          }
-          // ─────────────────────────────────────────────────────
         }
+
         setCentralConnection('connected');
-        if (!cancelled) timer = setTimeout(pollEvents, 4000);
+        if (!cancelled) {
+          timer = setTimeout(
+            pollEvents,
+            events.length === 200 ? 200 : 3000
+          );
+        }
       } catch {
-        if (!cancelled) { setCentralConnection('offline'); timer = setTimeout(pollEvents, 3000); }
+        if (!cancelled) {
+          setCentralConnection('offline');
+          timer = setTimeout(pollEvents, 5000);
+        }
       }
     }
+
     pollEvents();
-    return () => { cancelled = true; clearTimeout(timer); };
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, []);
 
-  // Local demo telemetry: no camera frames are sent to the central service.
-  useEffect(() => {
-    let stopped = false, timer;
-    const markStale = () => setBuses(prev => prev.map(bus => bus.edgeGps ? { ...bus, gpsStale: true } : bus));
-    async function pollGPS() {
-      try {
-        const status = await readJson(`${EDGE_URL}/api/status`);
-        if (stopped) return;
-        if (status.gps?.valid) {
-          const fix = status.gps;
-          setBuses(prev => prev.map(bus => bus.id === status.bus_id ? {
-            ...bus, lat: fix.latitude, lng: fix.longitude, edgeGps: true, gpsStale: false,
-            gpsSource: fix.source, gpsUpdatedAt: new Date().toISOString(),
-            currentLocation: fix.source === 'SIMULATED_ROUTE' ? 'Prototype GPS route' : 'External GPS fix',
-          } : bus));
-        } else markStale();
-      } catch { if (!stopped) markStale(); }
-      if (!stopped) timer = setTimeout(pollGPS, 1500);
-    }
-    pollGPS();
-    return () => { stopped = true; clearTimeout(timer); };
-  }, []);
-
+  // ──────────────────────────────────────────────────────────────
   // Derived category lists
+  // NOTE: school_zone_pedestrian added — runtime.py emits this event
+  // when a bus passes a school zone and detects pedestrians.
+  // ──────────────────────────────────────────────────────────────
   const potholes = detections.filter(d =>
-    ['pothole', 'road_damage', 'road_crack', 'road_patch', 'road_other'].includes(d.type)
-  );
+  ['pothole', 'road_damage', 'road_crack', 'road_patch', 'road_other'].includes(d.type)
+);
   const waterlogging = detections.filter(d => d.type === 'waterlogging');
-  const trafficSignals = detections.filter(d => d.type === 'damaged_signal' || d.type === 'damaged_signboard' || d.type === 'missing_zebra_crossing');
-  const schoolViolations = detections.filter(d => d.type === 'school_zone_violation');
-  const incidents = detections.filter(d => ['hit_and_run', 'rash_driving', 'dangerous_overtaking', 'pedestrian_risk', 'traffic_congestion', 'school_zone_pedestrian', 'red_light_violation', 'wrong_way_driving'].includes(d.type));
+  const trafficSignals = detections.filter(d =>
+    d.type === 'damaged_signal' ||
+    d.type === 'damaged_signboard' ||
+    d.type === 'missing_zebra_crossing'
+  );
+  const schoolViolations = detections.filter(d =>
+    d.type === 'school_zone_violation' || d.type === 'school_zone_pedestrian'
+  );
+  const incidents = detections.filter(d =>
+    [
+      'hit_and_run', 'rash_driving', 'dangerous_overtaking', 'pedestrian_risk',
+      'traffic_congestion', 'school_zone_pedestrian',
+      'red_light_violation', 'wrong_way_driving'
+    ].includes(d.type)
+  );
 
   // Live simulation tick every 6 seconds
   useEffect(() => {
     if (!simulationRunning) return;
 
     const interval = setInterval(() => {
-      // 1. Move buses slightly along their route
       setBuses(prevBuses =>
         prevBuses.map(bus => {
-          if (bus.edgeGps) return bus;
           const newCoords = updateBusCoordinate(bus.lat, bus.lng, bus.heading, bus.speed);
           const jitterSpeed = Math.max(10, Math.min(55, bus.speed + Math.floor(Math.random() * 5 - 2)));
           return {
@@ -233,431 +233,201 @@ export function UrbanPulseProvider({ children }) {
 
     return () => clearInterval(interval);
   }, [simulationRunning]);
-
+  // ── Live GPS from edge /api/status ─────────────────────
+  // Marks BUS-104 (whichever bus the edge reports) with edgeGps: true
+  // and updates its lat/lng from the real edge GPS fix.
+  useEffect(() => {
+    let cancelled = false, timer;
+    async function pollGPS() {
+      try {
+        const status = await readJson(`${EDGE_URL}/api/status`);
+        if (cancelled) return;
+        if (status.gps?.valid) {
+          const fix = status.gps;
+          setBuses(prev =>
+            prev.map(bus =>
+              bus.id === status.bus_id
+                ? {
+                    ...bus,
+                    lat: fix.latitude,
+                    lng: fix.longitude,
+                    edgeGps: true,
+                    gpsSource: fix.source,
+                    gpsStale: false,
+                    currentLocation:
+                      fix.source === 'SIMULATED_ROUTE'
+                        ? 'Prototype GPS route'
+                        : 'External GPS fix',
+                  }
+                : bus
+            )
+          );
+        }
+      } catch {
+        /* edge offline — leave edgeGps unset for all */
+      }
+      if (!cancelled) timer = setTimeout(pollGPS, 2000);
+    }
+    pollGPS();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, []);
   // Add a new detection from Live Camera / Edge AI
   const addNewDetection = (customData = {}) => {
     const type = customData.type || 'pothole';
     const deptInfo = getAutoAssignedDepartment(type);
 
-    const selectedBus =
-      customData.busId
-        ? buses.find(bus => bus.id === customData.busId)
-        : null;
-
-    const randomBus =
-      selectedBus ||
-      buses[Math.floor(Math.random() * buses.length)];
+    const selectedBus = customData.busId ? buses.find(bus => bus.id === customData.busId) : null;
+    const randomBus = selectedBus || buses[Math.floor(Math.random() * buses.length)];
 
     const now = new Date();
     const timeStr = now.toTimeString().split(' ')[0];
     const dateStr = now.toISOString().split('T')[0];
 
-    const confidence =
-      typeof customData.confidence === 'number'
-        ? customData.confidence
-        : 0.92;
-
-    const severity =
-      customData.severity ||
-      (confidence >= 0.90 ? 'CRITICAL' : 'HIGH');
-
-    const lat =
-      customData.lat ??
-      randomBus?.lat ??
-      12.9016;
-
-    const lng =
-      customData.lng ??
-      randomBus?.lng ??
-      80.2279;
-
-    /*
-     * ---------------------------------------------------------
-     * DUPLICATE / SAME-LOCATION INCIDENT DETECTION
-     * ---------------------------------------------------------
-     *
-     * If the same type of road problem is already within
-     * approximately 50 meters, treat this as another
-     * observation of the same incident.
-     */
+    const confidence = typeof customData.confidence === 'number' ? customData.confidence : 0.92;
+    const severity = customData.severity || (confidence >= 0.90 ? 'CRITICAL' : 'HIGH');
+    const lat = customData.lat ?? randomBus?.lat ?? 12.9016;
+    const lng = customData.lng ?? randomBus?.lng ?? 80.2279;
 
     const existingIncident = detections.find(item => {
       if (item.type !== type) return false;
-
-      /*
-       * IMPORTANT:
-       * Only cluster against incidents that were created
-       * by the live AI pipeline.
-       *
-       * This prevents an old/static demo record from
-       * swallowing a brand-new YOLO incident and preventing
-       * its notification.
-       */
-
       const source = item.detectionSource || '';
-
       const isLiveAiIncident =
-        source === 'LIVE_AI' ||
-        source === 'UPLOADED_VIDEO_AI' ||
-        source === 'WEBCAM_AI';
-
-      if (!isLiveAiIncident) {
-        return false;
-      }
-
-      if (
-        typeof item.lat !== 'number' ||
-        typeof item.lng !== 'number'
-      ) {
-        return false;
-      }
-
-      const distance = distanceInMeters(
-        lat,
-        lng,
-        item.lat,
-        item.lng
-      );
-
-      return distance <= 50;
+        source === 'LIVE_AI' || source === 'UPLOADED_VIDEO_AI' || source === 'WEBCAM_AI';
+      if (!isLiveAiIncident) return false;
+      if (typeof item.lat !== 'number' || typeof item.lng !== 'number') return false;
+      return distanceInMeters(lat, lng, item.lat, item.lng) <= 50;
     });
-
-    // ---------------------------------------------------------
-    // EXISTING INCIDENT FOUND
-    // ---------------------------------------------------------
 
     if (existingIncident) {
       const observation = {
-        id: `obs-${Date.now()}-${Math.random()
-          .toString(36)
-          .slice(2, 7)}`,
-
-        busId:
-          customData.busId ||
-          randomBus?.id ||
-          'UNKNOWN-BUS',
-
-        cameraId:
-          customData.cameraId ||
-          'FRONT-CAM-01',
-
+        id: `obs-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        busId: customData.busId || randomBus?.id || 'UNKNOWN-BUS',
+        cameraId: customData.cameraId || 'FRONT-CAM-01',
         confidence,
-
-        detectionSource:
-          customData.detectionSource ||
-          'LIVE_AI',
-
-        evidenceImg:
-          customData.evidenceImg ||
-          null,
-
-        boundingBox:
-          customData.boundingBox ||
-          null,
-
-        detectedAt:
-          customData.detectedAt ||
-          now.toISOString(),
-
-        timestamp:
-          `${dateStr} ${timeStr}`
+        detectionSource: customData.detectionSource || 'LIVE_AI',
+        evidenceImg: customData.evidenceImg || null,
+        boundingBox: customData.boundingBox || null,
+        detectedAt: customData.detectedAt || now.toISOString(),
+        timestamp: `${dateStr} ${timeStr}`
       };
 
       let updatedIncident = null;
-
       setDetections(prev =>
         prev.map(item => {
-          if (item.id !== existingIncident.id) {
-            return item;
-          }
-
-          const observations = [
-            ...(item.observations || []),
-            observation
-          ];
-
-          const highestConfidence = Math.max(
-            item.confidence || 0,
-            confidence
-          );
-
+          if (item.id !== existingIncident.id) return item;
+          const observations = [...(item.observations || []), observation];
+          const highestConfidence = Math.max(item.confidence || 0, confidence);
           updatedIncident = {
             ...item,
-
-            // Keep one incident ID
             id: item.id,
-
-            // Increase number of independent observations
             observationCount: observations.length,
-
             observations,
-
-            // Keep strongest AI confidence
             confidence: highestConfidence,
-
-            // Remember latest detection
-            lastDetectedAt:
-              customData.detectedAt ||
-              now.toISOString(),
-
-            lastDetectedBy:
-              customData.busId ||
-              randomBus?.id ||
-              'UNKNOWN-BUS',
-
-            // Evidence can be updated with newer/better evidence
-            evidenceImg:
-              customData.evidenceImg ||
-              item.evidenceImg,
-
-            // Make the incident stronger when repeatedly confirmed
-            severity:
-              item.severity === 'CRITICAL' ||
-                severity === 'CRITICAL'
-                ? 'CRITICAL'
-                : item.severity,
-
+            lastDetectedAt: customData.detectedAt || now.toISOString(),
+            lastDetectedBy: customData.busId || randomBus?.id || 'UNKNOWN-BUS',
+            evidenceImg: customData.evidenceImg || item.evidenceImg,
+            severity: item.severity === 'CRITICAL' || severity === 'CRITICAL' ? 'CRITICAL' : item.severity,
             statusHistory: [
               ...(item.statusHistory || []),
               {
                 status: item.status,
                 time: `${dateStr} ${timeStr}`,
-                note:
-                  `Additional AI observation received from ${customData.busId ||
-                  randomBus?.id ||
-                  'road camera'
-                  }`
+                note: `Additional AI observation received from ${customData.busId || randomBus?.id || 'road camera'}`
               }
             ]
           };
-
           return updatedIncident;
         })
       );
-
-      /*
-       * IMPORTANT:
-       * Do NOT create another notification.
-       *
-       * The existing incident already generated an alert.
-       * Repeated observations are simply attached to it.
-       */
-
       return updatedIncident || existingIncident;
     }
 
-    // ---------------------------------------------------------
-    // NEW INCIDENT
-    // ---------------------------------------------------------
-
-    const newId =
-      customData.id ||
-      generateReportId(type);
-
+    const newId = customData.id || generateReportId(type);
     const newDetection = {
       id: newId,
-
       type,
-
-      title:
-        customData.title ||
-        `Live AI Detected: ${type
-          .replace(/_/g, ' ')
-          .toUpperCase()}`,
-
-      location:
-        customData.location ||
-        randomBus?.currentLocation ||
-        'Live Road Monitoring',
-
-      area:
-        customData.area ||
-        'OMR Corridor',
-
-      lat,
-      lng,
-
-      severity,
-
-      confidence,
-
-      detectionSource:
-        customData.detectionSource ||
-        'LIVE_AI',
-
-      boundingBox:
-        customData.boundingBox ||
-        null,
-
-      detectedAt:
-        customData.detectedAt ||
-        now.toISOString(),
-
-      lastDetectedAt:
-        customData.detectedAt ||
-        now.toISOString(),
-
-      busId:
-        customData.busId ||
-        randomBus?.id ||
-        'UNKNOWN-BUS',
-
-      cameraId:
-        customData.cameraId ||
-        'FRONT-CAM-01',
-
-      timestamp:
-        customData.timestamp ||
-        `${dateStr} ${timeStr}`,
-
+      title: customData.title || `Live AI Detected: ${type.replace(/_/g, ' ').toUpperCase()}`,
+      location: customData.location || randomBus?.currentLocation || 'Live Road Monitoring',
+      area: customData.area || 'OMR Corridor',
+      lat, lng, severity, confidence,
+      detectionSource: customData.detectionSource || 'LIVE_AI',
+      boundingBox: customData.boundingBox || null,
+      detectedAt: customData.detectedAt || now.toISOString(),
+      lastDetectedAt: customData.detectedAt || now.toISOString(),
+      busId: customData.busId || randomBus?.id || 'UNKNOWN-BUS',
+      cameraId: customData.cameraId || 'FRONT-CAM-01',
+      timestamp: customData.timestamp || `${dateStr} ${timeStr}`,
       timeAgo: 'Just now',
-
-      department:
-        customData.department ||
-        deptInfo.department,
-
-      division:
-        customData.division ||
-        deptInfo.division,
-
-      deptId:
-        customData.deptId ||
-        deptInfo.deptId,
-
-      assignedOfficer:
-        customData.assignedOfficer ||
-        deptInfo.officer,
-
-      // IMPORTANT:
-      // New incidents begin at DETECTED.
-      status:
-        customData.status ||
-        'DETECTED',
-
+      department: customData.department || deptInfo.department,
+      division: customData.division || deptInfo.division,
+      deptId: customData.deptId || deptInfo.deptId,
+      assignedOfficer: customData.assignedOfficer || deptInfo.officer,
+      status: customData.status || 'DETECTED',
       statusHistory: [
         {
           status: 'DETECTED',
           time: `${dateStr} ${timeStr}`,
-          note:
-            customData.detectionSource === 'LIVE_AI'
-              ? `YOLO AI detected ${type.replace(/_/g, ' ')} from live camera`
-              : 'AI Edge inference tagged live detection'
+          note: customData.detectionSource === 'LIVE_AI'
+            ? `YOLO AI detected ${type.replace(/_/g, ' ')} from live camera`
+            : 'AI Edge inference tagged live detection'
         }
       ],
-
-      // First observation
       observationCount: 1,
-
       observations: [
         {
           id: `obs-${Date.now()}`,
-
-          busId:
-            customData.busId ||
-            randomBus?.id ||
-            'UNKNOWN-BUS',
-
-          cameraId:
-            customData.cameraId ||
-            'FRONT-CAM-01',
-
+          busId: customData.busId || randomBus?.id || 'UNKNOWN-BUS',
+          cameraId: customData.cameraId || 'FRONT-CAM-01',
           confidence,
-
-          detectionSource:
-            customData.detectionSource ||
-            'LIVE_AI',
-
-          evidenceImg:
-            customData.evidenceImg ||
-            null,
-
-          boundingBox:
-            customData.boundingBox ||
-            null,
-
-          detectedAt:
-            customData.detectedAt ||
-            now.toISOString(),
-
-          timestamp:
-            `${dateStr} ${timeStr}`
+          detectionSource: customData.detectionSource || 'LIVE_AI',
+          evidenceImg: customData.evidenceImg || null,
+          boundingBox: customData.boundingBox || null,
+          detectedAt: customData.detectedAt || now.toISOString(),
+          timestamp: `${dateStr} ${timeStr}`
         }
       ],
-
-      evidenceImg:
-        customData.evidenceImg ||
-        null,
-
-      evidenceCaptured:
-        Boolean(customData.evidenceImg),
-
+      evidenceImg: customData.evidenceImg || null,
+      evidenceCaptured: Boolean(customData.evidenceImg),
       ...customData
     };
 
-    // Add the new incident
-    setDetections(prev => [
-      newDetection,
-      ...prev
-    ]);
-
-    // ---------------------------------------------------------
-    // ONLY NEW INCIDENTS CREATE NOTIFICATIONS
-    // ---------------------------------------------------------
+    setDetections(prev => [newDetection, ...prev]);
 
     const newNotif = {
-      id:
-        `notif-${Date.now()}-${Math.random()
-          .toString(36)
-          .slice(2, 7)}`,
-
-      title:
-        `LIVE AI: ${type
-          .replace(/_/g, ' ')
-          .toUpperCase()} DETECTED`,
-
+      id: `notif-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      title: `LIVE AI: ${type.replace(/_/g, ' ').toUpperCase()} DETECTED`,
       message:
         `${newDetection.busId} / ${newDetection.cameraId} detected ` +
         `${type.replace(/_/g, ' ')} with ` +
         `${Math.round(confidence * 100)}% confidence. ` +
-        `Incident ${newId} created and assigned to ` +
-        `${newDetection.department}.`,
-
-      category:
-        severity === 'CRITICAL' ||
-          severity === 'EMERGENCY'
-          ? 'CRITICAL'
-          : 'WARNING',
-
+        `Incident ${newId} created and assigned to ${newDetection.department}.`,
+      category: severity === 'CRITICAL' || severity === 'EMERGENCY' ? 'CRITICAL' : 'WARNING',
       time: 'Just now',
-
       timestamp: Date.now(),
-
       unread: true,
-
-      reportId: newId
+      reportId: newId,
+      type,
+      busId: newDetection.busId,
+      lat: newDetection.lat,
+      lng: newDetection.lng
     };
 
-    console.log(
-      'LIVE AI → NEW INCIDENT → NOTIFICATION',
-      {
-        type,
-        confidence,
-        incidentId: newId,
-        busId: newDetection.busId,
-        cameraId: newDetection.cameraId,
-        notification: newNotif
+    if (typeof window !== 'undefined') {
+      window.__UP_NOTIF_LAST = window.__UP_NOTIF_LAST || 0;
+      const __t = Date.now();
+      if (__t - window.__UP_NOTIF_LAST >= 5000) {
+        window.__UP_NOTIF_LAST = __t;
+        setNotifications(prev => [newNotif, ...prev].slice(0, 15));
       }
-    );
-
-    setNotifications(prev => [newNotif, ...prev].slice(0, 15));
+    }
 
     return newDetection;
   };
 
-  // ---------------------------------------------------------
   // STRICT INCIDENT WORKFLOW
-  // ---------------------------------------------------------
-
   const WORKFLOW_TRANSITIONS = {
     DETECTED: 'VERIFIED',
     VERIFIED: 'ASSIGNED',
@@ -666,12 +436,7 @@ export function UrbanPulseProvider({ children }) {
     RESOLVED: 'VERIFIED CLOSED'
   };
 
-  const updateReportStatus = async (
-    reportId,
-    newStatus,
-    note = '',
-    assignedDept = null
-  ) => {
+  const updateReportStatus = async (reportId, newStatus, note = '', assignedDept = null) => {
     const edgeRecord = detections.find(d => d.id === reportId && d.edgeEvent);
     if (edgeRecord) {
       try {
@@ -690,148 +455,63 @@ export function UrbanPulseProvider({ children }) {
     }
 
     const now = new Date();
-
-    const timeStr =
-      now.toTimeString().split(' ')[0];
-
-    const dateStr =
-      now.toISOString().split('T')[0];
+    const timeStr = now.toTimeString().split(' ')[0];
+    const dateStr = now.toISOString().split('T')[0];
 
     let transitionAccepted = false;
     let updatedIncident = null;
 
     setDetections(prev =>
       prev.map(item => {
-        if (item.id !== reportId) {
-          return item;
-        }
+        if (item.id !== reportId) return item;
 
-        const currentStatus =
-          item.status || 'DETECTED';
-
-        const expectedNextStatus =
-          WORKFLOW_TRANSITIONS[currentStatus];
-
-        // ---------------------------------------------------
-        // STRICT WORKFLOW TRANSITION
-        // ---------------------------------------------------
+        const currentStatus = item.status || 'DETECTED';
+        const expectedNextStatus = WORKFLOW_TRANSITIONS[currentStatus];
 
         if (newStatus !== expectedNextStatus) {
-          console.warn(
-            `Invalid workflow transition: ${currentStatus} → ${newStatus}`
-          );
-
+          console.warn(`Invalid workflow transition: ${currentStatus} → ${newStatus}`);
           return item;
         }
 
         transitionAccepted = true;
-
         const updatedHistory = [
           ...(item.statusHistory || []),
           {
             status: newStatus,
             time: `${dateStr} ${timeStr}`,
-            note:
-              note ||
-              `Incident moved from ${currentStatus} to ${newStatus}`
+            note: note || `Incident moved from ${currentStatus} to ${newStatus}`
           }
         ];
 
-        updatedIncident = {
-          ...item,
-
-          status: newStatus,
-
-          statusHistory: updatedHistory
-        };
-
-        // ---------------------------------------------------
-        // DEPARTMENT ASSIGNMENT
-        // ---------------------------------------------------
+        updatedIncident = { ...item, status: newStatus, statusHistory: updatedHistory };
 
         if (assignedDept) {
-          updatedIncident.department =
-            assignedDept.department ||
-            item.department;
-
-          updatedIncident.division =
-            assignedDept.division ||
-            item.division;
-
-          updatedIncident.deptId =
-            assignedDept.deptId ||
-            item.deptId;
+          updatedIncident.department = assignedDept.department || item.department;
+          updatedIncident.division = assignedDept.division || item.division;
+          updatedIncident.deptId = assignedDept.deptId || item.deptId;
         }
-
-        // ---------------------------------------------------
-        // RESOLUTION DATA
-        // ---------------------------------------------------
 
         if (newStatus === 'RESOLVED') {
-          updatedIncident.resolutionDate =
-            `${dateStr} ${timeStr}`;
-
-          updatedIncident.resolvedBy =
-            item.department ||
-            'Field Action Team';
-
-          updatedIncident.resolutionNote =
-            note ||
-            'Issue rectified by field team.';
+          updatedIncident.resolutionDate = `${dateStr} ${timeStr}`;
+          updatedIncident.resolvedBy = item.department || 'Field Action Team';
+          updatedIncident.resolutionNote = note || 'Issue rectified by field team.';
         }
-
-        // ---------------------------------------------------
-        // FINAL VERIFICATION
-        // ---------------------------------------------------
 
         if (newStatus === 'VERIFIED CLOSED') {
-          updatedIncident.closedDate =
-            `${dateStr} ${timeStr}`;
-
-          updatedIncident.closedBy =
-            item.department ||
-            'Verification Team';
-
-          updatedIncident.closureNote =
-            note ||
-            'Subsequent road observation verified that the issue has been resolved.';
-
-          updatedIncident.resolutionDate =
-            item.resolutionDate ||
-            `${dateStr} ${timeStr}`;
-
-          updatedIncident.resolutionNote =
-            item.resolutionNote ||
-            'Issue rectified and verified.';
+          updatedIncident.closedDate = `${dateStr} ${timeStr}`;
+          updatedIncident.closedBy = item.department || 'Verification Team';
+          updatedIncident.closureNote = note || 'Subsequent road observation verified that the issue has been resolved.';
+          updatedIncident.resolutionDate = item.resolutionDate || `${dateStr} ${timeStr}`;
+          updatedIncident.resolutionNote = item.resolutionNote || 'Issue rectified and verified.';
         }
 
-        // ---------------------------------------------------
-        // UPDATE SELECTED REPORT
-        // ---------------------------------------------------
-
-        if (
-          selectedReport &&
-          selectedReport.id === reportId
-        ) {
+        if (selectedReport && selectedReport.id === reportId) {
           setSelectedReport(updatedIncident);
         }
 
         return updatedIncident;
       })
     );
-
-    // IMPORTANT:
-    // Status changes do NOT create notifications.
-    //
-    // Notifications are created only when a NEW detection
-    // becomes a NEW incident inside addNewDetection().
-    //
-    // This prevents:
-    // DETECTED → VERIFIED
-    // VERIFIED → ASSIGNED
-    // ASSIGNED → IN PROGRESS
-    // etc.
-    // from flooding the notification panel.
 
     return transitionAccepted;
   };
@@ -841,6 +521,29 @@ export function UrbanPulseProvider({ children }) {
   };
 
   const unreadNotifCount = notifications.filter(n => n.unread).length;
+
+  // ──────────────────────────────────────────────────────────────
+  // DEV HELPER: force-refresh from the central backend.
+  // Call `window.__UP_RESET_EVENTS()` in the browser console to
+  // clear local dedup and refetch everything from cursor 0.
+  // ──────────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      window.__UP_RESET_EVENTS = () => {
+        eventCursor.current = 0;
+        seenEdgeEvents.current.clear();
+        localStorage.removeItem('up_event_cursor');
+        localStorage.removeItem('up_seen_events');
+        setDetections(INITIAL_ALL_DETECTIONS.map(d => ({
+          ...d, title: `[SAMPLE] ${d.title}`, detectionSource: 'SEEDED_DEMO'
+        })));
+        console.info('[UrbanPulse] Events reset. Next poll will refetch from cursor 0.');
+      };
+    }
+    return () => {
+      if (typeof window !== 'undefined') delete window.__UP_RESET_EVENTS;
+    };
+  }, []);
 
   return (
     <UrbanPulseContext.Provider

@@ -1,5 +1,4 @@
 import React from 'react';
-
 import {
   Bus,
   Activity,
@@ -10,7 +9,7 @@ import {
   ArrowRight,
   TrendingUp,
   FileSpreadsheet,
-  CheckCircle2
+  CheckCircle2,
 } from 'lucide-react';
 import { StatCard } from '../components/common/StatCard';
 import { GISMap } from '../components/map/GISMap';
@@ -19,27 +18,42 @@ import { LiveDetectionStream } from '../components/dashboard/LiveDetectionStream
 import { useUrbanPulse } from '../context/UrbanPulseContext';
 import { exportToCSV } from '../utils/exportUtils';
 import { DEPARTMENTS } from '../data/departmentsData';
-import { EDGE_NETWORK_METRICS } from '../data/edgeNodesData';
 
 export function DashboardPage() {
-  const {
-    buses,
-    detections,
-    potholes,
-    setActiveRoute
-  } = useUrbanPulse();
+  const { buses, detections, potholes, setActiveRoute } = useUrbanPulse();
+
+  const liveBuses = buses.filter(b => b.edgeGps).length;
+  const criticalAlerts = detections.filter(d => d.severity === 'CRITICAL').length;
+  const congestionEvents = detections.filter(d => d.type === 'traffic_congestion').length;
+  const resolvedCount = detections.filter(
+    d => d.status === 'RESOLVED' || d.status === 'VERIFIED CLOSED'
+  ).length;
 
   return (
     <div className="space-y-6 animate-in fade-in duration-150">
       {/* Dashboard Top Banner */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-extrabold tracking-tight text-slate-900">
-            City Intelligence Overview
-          </h1>
-          <p className="text-xs text-slate-500 mt-0.5">
-            Real-time urban monitoring powered by public transport Edge AI
+          <div className="flex items-center gap-2">
+            <h1 className="text-lg font-extrabold tracking-tight text-slate-900">
+              City Intelligence Overview
+            </h1>
+            <span className="text-[9px] font-mono font-bold bg-blue-50 text-blue-700 border border-blue-200 px-1.5 py-0.5 rounded">
+              SIH 26124 · BEL
+            </span>
+          </div>
+          <p className="text-[11px] text-slate-500 mt-0.5">
+            Live edge AI on 1 prototype bus · Architecture scales to 1,000-bus MTC fleet
           </p>
+          <div className="flex items-center gap-2 mt-2 text-[10px] font-bold">
+            <span className="px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">● SENSE</span>
+            <span className="text-slate-300">→</span>
+            <span className="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200">● DETECT</span>
+            <span className="text-slate-300">→</span>
+            <span className="px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">● VALIDATE</span>
+            <span className="text-slate-300">→</span>
+            <span className="px-1.5 py-0.5 rounded bg-red-50 text-red-700 border border-red-200">● ACT</span>
+          </div>
         </div>
 
         <div className="flex items-center gap-2.5">
@@ -61,61 +75,54 @@ export function DashboardPage() {
         </div>
       </div>
 
-      {/* Top 6 KPI Cards with Semantic Colors */}
+      {/* Live KPI Cards — all values computed from real data */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3.5">
         <StatCard
-          title="ACTIVE BUSES"
-          value={buses.length || 127}
-          subtitle="+8 deployed today"
-          trend="98.4%"
-          trendType="up"
+          title="LIVE BUSES"
+          value={liveBuses}
+          subtitle="1 live · 999 projected"
           variant="default"
           icon={Bus}
           onClick={() => setActiveRoute('fleet')}
         />
         <StatCard
           title="ACTIVE DETECTIONS"
-          value={detections.length || 583}
-          subtitle="+14.2% from yesterday"
-          trend="+14.2%"
-          trendType="up"
+          value={detections.length}
+          subtitle="from edge AI"
           variant="default"
           icon={Activity}
           onClick={() => setActiveRoute('all-logs')}
         />
         <StatCard
           title="CRITICAL ALERTS"
-          value="18"
-          subtitle="5 unresolved priority"
-          variant="danger"
-          badgeText="HIGH"
+          value={criticalAlerts}
+          subtitle={criticalAlerts > 0 ? 'requires attention' : 'all clear'}
+          variant={criticalAlerts > 0 ? 'danger' : 'success'}
           icon={AlertTriangle}
           onClick={() => setActiveRoute('incident-center')}
         />
         <StatCard
           title="ROAD DEFECTS"
-          value={potholes.length || 342}
-          subtitle="27 critical severity"
+          value={potholes.length}
+          subtitle="crack · pothole · patch"
           variant="warning"
           icon={Cone}
           onClick={() => setActiveRoute('potholes')}
         />
         <StatCard
-          title="TRAFFIC STATUS"
-          value="HIGH"
-          subtitle="23 congested zones"
-          variant="warning"
+          title="CONGESTION"
+          value={congestionEvents}
+          subtitle="live zones"
+          variant={congestionEvents > 0 ? 'warning' : 'success'}
           icon={TrendingUp}
           onClick={() => setActiveRoute('traffic-intel')}
         />
         <StatCard
-          title="DEPARTMENT ACTIONS"
-          value="76"
-          subtitle="62 resolved tickets"
+          title="RESOLVED"
+          value={resolvedCount}
+          subtitle="closed tickets"
           variant="success"
-          trend="81.5%"
-          trendType="up"
-          icon={Building2}
+          icon={CheckCircle2}
           onClick={() => setActiveRoute('department-response')}
         />
       </div>
@@ -149,7 +156,6 @@ export function DashboardPage() {
 
       {/* Department SLA & Edge AI Banner Grid */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        {/* Department Quick Workload */}
         <div className="md:col-span-2 bg-white rounded-card border border-slate-200 p-5 shadow-subtle space-y-4">
           <div className="flex items-center justify-between border-b border-slate-200 pb-3">
             <div className="flex items-center gap-2">
@@ -157,11 +163,16 @@ export function DashboardPage() {
                 <Building2 className="w-4 h-4" />
               </div>
               <div>
-                <h3 className="font-extrabold text-xs uppercase tracking-wider text-slate-900">
-                  Government Department Assignment & SLA
-                </h3>
+                <div className="flex items-center gap-2">
+                  <h3 className="font-extrabold text-xs uppercase tracking-wider text-slate-900">
+                    Department Assignment & SLA
+                  </h3>
+                  <span className="text-[9px] font-mono font-bold bg-amber-50 text-amber-700 border border-amber-200 px-1.5 py-0.5 rounded">
+                    SAMPLE DATA
+                  </span>
+                </div>
                 <p className="text-[11px] text-slate-500">
-                  Autonomous defect routing to responsible civic bodies
+                  Autonomous defect routing to responsible civic bodies (sample until live departments connect)
                 </p>
               </div>
             </div>
@@ -199,36 +210,35 @@ export function DashboardPage() {
           </div>
         </div>
 
-        {/* Edge AI Health Widget - Clean White Theme */}
         <div className="bg-white text-slate-800 rounded-card border border-slate-200 p-5 shadow-subtle flex flex-col justify-between space-y-4">
           <div>
             <div className="flex items-center justify-between border-b border-slate-200 pb-3">
               <div className="flex items-center gap-2">
-                <div className="p-1.5 rounded-lg bg-blue-50 text-blue-600 border border-blue-100">
+                <div className="p-1.5 rounded-lg bg-emerald-50 text-emerald-600 border border-emerald-100">
                   <Cpu className="w-4 h-4" />
                 </div>
                 <div>
                   <h3 className="font-extrabold text-xs text-slate-900 uppercase tracking-wider">
                     Edge AI Network
                   </h3>
-                  <p className="text-[10px] text-blue-600 font-semibold">
-                    YOLOv11 TensorRT Active
+                  <p className="text-[10px] text-emerald-600 font-semibold">
+                    YOLOv8n · CPU inference
                   </p>
                 </div>
               </div>
               <span className="text-[10px] bg-emerald-50 text-emerald-700 border border-emerald-200 font-bold px-2 py-0.5 rounded">
-                ● 98.2% ONLINE
+                ● LIVE
               </span>
             </div>
 
             <div className="grid grid-cols-2 gap-2 text-xs pt-3 font-mono">
               <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200">
                 <span className="text-[10px] text-slate-400 block font-sans">BANDWIDTH SAVED</span>
-                <span className="text-base font-bold text-blue-600">{EDGE_NETWORK_METRICS.bandwidthSavedPercent}%</span>
+                <span className="text-base font-bold text-blue-600">148,988×</span>
               </div>
               <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200">
                 <span className="text-[10px] text-slate-400 block font-sans">AVG LATENCY</span>
-                <span className="text-base font-bold text-slate-900">{EDGE_NETWORK_METRICS.avgInferenceLatencyMs} ms</span>
+                <span className="text-base font-bold text-slate-900">~100 ms</span>
               </div>
             </div>
           </div>

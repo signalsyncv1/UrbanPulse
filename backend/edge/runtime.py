@@ -58,6 +58,19 @@ def route_position(config, elapsed):
     return tuple(a[i] + fraction * (b[i] - a[i]) for i in (0, 1))
 
 
+def _iou(box1, box2):
+    """Intersection-over-union for xyxy boxes — dedupes detections across models."""
+    x1 = max(box1[0], box2[0]); y1 = max(box1[1], box2[1])
+    x2 = min(box1[2], box2[2]); y2 = min(box1[3], box2[3])
+    if x2 <= x1 or y2 <= y1:
+        return 0.0
+    inter = (x2 - x1) * (y2 - y1)
+    a1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    a2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+    denom = a1 + a2 - inter
+    return inter / denom if denom > 0 else 0.0
+
+
 class CameraWorker:
     def __init__(self, kind, config, outbox, started, gps):
         self.kind, self.config, self.outbox, self.started = kind, config, outbox, started
@@ -75,6 +88,8 @@ class CameraWorker:
         self.jpeg = None
         self.sequence = 0
         self.published_at = None
+        self.donor_model = None
+        self.donor_model_name = None
         self.state = {"status": "starting", "error": None, "camera_id": self.camera_id,
                       "bus_id": config["bus_id"], "source": "PRERECORDED_VIDEO_AI",
                       "gps_source": "SIMULATED_ROUTE", "classes": {}, "inference_ms": None,
@@ -128,6 +143,25 @@ class CameraWorker:
                 raise RuntimeError("CUDA requested but unavailable in this Python environment")
             self.model_name = model_path.name
             model = YOLO(str(model_path))
+
+            # Optional second model for road — union of detections.
+            # Complements primary model with speed_bump / unpaved_road.
+            if self.kind == "road":
+                donor_rel = cfg.get("donor_road_model")
+                if donor_rel:
+                    donor_path = Path(donor_rel)
+                    if not donor_path.is_absolute():
+                        donor_path = BASE / donor_rel
+                    if donor_path.is_file():
+                        try:
+                            self.donor_model = YOLO(str(donor_path))
+                            self.donor_model_name = donor_path.name
+                            LOG.info("Donor road model loaded: %s | classes=%s",
+                                     donor_path.name, self.donor_model.names)
+                        except Exception as exc:
+                            LOG.warning("Donor model load failed: %s", exc)
+                            self.donor_model = None
+
             cap = cv2.VideoCapture(str(video_path))
             if not cap.isOpened():
                 raise RuntimeError(f"Cannot decode video: {video_path}")
@@ -161,13 +195,20 @@ class CameraWorker:
                     tracker.reset()
             else:
                 model.predict(warm_frame, **kwargs)
+                if self.donor_model is not None:
+                    try:
+                        self.donor_model.predict(warm_frame, conf=cfg.get("donor_confidence", 0.25),
+                                                 imgsz=selected_imgsz, device=device, verbose=False)
+                    except Exception as exc:
+                        LOG.warning("Donor warm-up failed: %s", exc)
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             CONGESTION_THRESHOLDS.update(low=cfg["congestion_low_max"], medium=cfg["congestion_medium_max"])
             with self.lock:
                 self.state.update(status="running", device=str(device), fp16=device != "cpu",
                     model=self.model_name, classes=names, source_fps=fps, imgsz=selected_imgsz,
-                    violations_enabled=rules.enabled if self.kind=="traffic" else False,
+                    violations_enabled=rules.enabled if self.kind == "traffic" else False,
                     violation_status=rules.reason, depth_measured=False,
+                    donor_model=self.donor_model_name,
                     source_width=int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
                     source_height=int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)), source_duration_seconds=duration)
             playback_start = time.monotonic()
@@ -189,7 +230,6 @@ class CameraWorker:
                     counts_window.clear()
                     previous_level, level_since = "UNKNOWN", None
                 next_frame = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
-                # Decode only up to the scheduled frame; large gaps seek, never queue.
                 gap = target - next_frame
                 if loop != last_loop or gap < 0 or gap > 6:
                     cap.set(cv2.CAP_PROP_POS_FRAMES, target)
@@ -207,6 +247,22 @@ class CameraWorker:
                     result = model.track(frame, persist=True, tracker=tracker_name, **kwargs)[0]
                 else:
                     result = model.predict(frame, **kwargs)[0]
+
+                # Donor road model — union of detections (runs inside the loop).
+                donor_boxes_raw = []
+                if self.kind == "road" and self.donor_model is not None:
+                    try:
+                        donor_result = self.donor_model.predict(
+                            frame,
+                            conf=cfg.get("donor_confidence", 0.25),
+                            imgsz=selected_imgsz,
+                            device=device,
+                            verbose=False,
+                        )[0]
+                        donor_boxes_raw = donor_result.boxes
+                    except Exception as exc:
+                        LOG.warning("Donor inference failed: %s", exc)
+
                 # Ultralytics returns xyxy in original image coordinates and measured inference timing.
                 self.inference_ms = float(result.speed["inference"])
                 predict_ms = (time.perf_counter() - begin) * 1000
@@ -226,38 +282,50 @@ class CameraWorker:
                         counts[label] += 1
                     if self.kind == "traffic" and label == "traffic light":
                         x1, y1, x2, y2 = [int(x) for x in xyxy]
-                        crop = frame[max(0,y1):min(height,y2), max(0,x1):min(width,x2)]
+                        crop = frame[max(0, y1):min(height, y2), max(0, x1):min(width, x2)]
                         color, score = classify_light_color(crop)
-                        candidate={"state":color.upper(), "color_score":score, "detector_confidence":confidence}
+                        candidate = {"state": color.upper(), "color_score": score, "detector_confidence": confidence}
                         if color != "unknown":
                             signal_candidates.append(candidate)
-                        if rules.accepts_signal(xyxy,width,height):
+                        if rules.accepts_signal(xyxy, width, height):
                             governing_signals.append(candidate)
+
+                # Merge donor detections — dedupe by IoU > 0.5 against primary boxes.
+                if donor_boxes_raw:
+                    for dbox in donor_boxes_raw:
+                        dcls = int(dbox.cls.item())
+                        dlabel = self.donor_model.names[dcls]
+                        dconf = float(dbox.conf.item())
+                        dxyxy = dbox.xyxy[0].tolist()
+                        if any(_iou(dxyxy, b["xyxy"]) > 0.5 for b in boxes):
+                            continue
+                        boxes.append({
+                            "class_name": dlabel,
+                            "confidence": dconf,
+                            "track_id": None,
+                            "xyxy": dxyxy,
+                            "source_model": "donor",
+                        })
+
                 vehicle_count = sum(counts[n] for n in ("bicycle", "car", "motorcycle", "bus", "truck"))
                 observed_states = {item["state"] for item in governing_signals}
-                governing_signal = next(iter(observed_states)) if len(observed_states)==1 else "UNKNOWN"
-                rule_events = rules.update(boxes, governing_signal, source_frame/fps, width, height) if self.kind=="traffic" else []
+                governing_signal = next(iter(observed_states)) if len(observed_states) == 1 else "UNKNOWN"
+                rule_events = rules.update(boxes, governing_signal, source_frame / fps, width, height) if self.kind == "traffic" else []
                 annotated = result.plot(line_width=2, labels=True, boxes=True, conf=True)
-                if self.kind=="road" and cfg.get("pothole_shading", True):
+                if self.kind == "road" and cfg.get("pothole_shading", True):
                     import numpy as np
                     overlay = annotated.copy()
                     for index, box in enumerate(boxes):
-                        if box["class_name"].lower() != "pothole": continue
+                        if box["class_name"].lower() != "pothole":
+                            continue
                         if result.masks is not None and index < len(result.masks.xy):
-                            cv2.fillPoly(overlay, [result.masks.xy[index].astype(np.int32)], (0,190,255))
+                            cv2.fillPoly(overlay, [result.masks.xy[index].astype(np.int32)], (0, 190, 255))
                         else:
-                            x1,y1,x2,y2=map(int,box["xyxy"])
-                            cv2.rectangle(overlay,(max(0,x1),max(0,y1)),(min(width-1,x2),min(height-1,y2)),(0,190,255),-1)
-                    annotated = cv2.addWeighted(overlay,0.18,annotated,0.82,0)
-                    cv2.putText(annotated,"Pothole ROI highlight | depth not measured",(10,height-12),cv2.FONT_HERSHEY_SIMPLEX,0.45,(255,255,255),1,cv2.LINE_AA)
-                if self.kind=="traffic" and False:
-                    for points in rules.history.values():
-                        trail=[(int(point[0]*width),int(point[1]*height)) for _,point in points]
-                        for a,b in zip(trail,trail[1:]): cv2.line(annotated,a,b,(220,190,0),2)
-                    if rules.enabled:
-                        a,b=rules.settings["stop_line"]
-                        cv2.line(annotated,(int(a[0]*width),int(a[1]*height)),(int(b[0]*width),int(b[1]*height)),(0,0,255),2)
-                school = nearest_school(self.frame_fix,self.schools,cfg.get("school_context",{}).get("radius_m",150))
+                            x1, y1, x2, y2 = map(int, box["xyxy"])
+                            cv2.rectangle(overlay, (max(0, x1), max(0, y1)), (min(width - 1, x2), min(height - 1, y2)), (0, 190, 255), -1)
+                    annotated = cv2.addWeighted(overlay, 0.18, annotated, 0.82, 0)
+                    cv2.putText(annotated, "Pothole ROI highlight | depth not measured", (10, height - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+                school = nearest_school(self.frame_fix, self.schools, cfg.get("school_context", {}).get("radius_m", 150))
 
                 if annotated.shape[1] > cfg["display_width"]:
                     scale = cfg["display_width"] / annotated.shape[1]
@@ -283,46 +351,49 @@ class CameraWorker:
                     if level != previous_level:
                         previous_level, level_since = level, now
                     if level in ("MEDIUM", "HIGH") and now - level_since >= cfg["congestion_hold_seconds"]:
-                        event = self.event("TRAFFIC_CONGESTION", level, source_frame/fps, source_frame,
-                            {"congestion_level": level, "average_vehicle_count": round(average,2),
+                        event = self.event("TRAFFIC_CONGESTION", level, source_frame / fps, source_frame,
+                            {"congestion_level": level, "average_vehicle_count": round(average, 2),
                              "counts": dict(counts), "method": "vehicle-count heuristic; not measured road speed",
                              "thresholds": {"low_max": cfg["congestion_low_max"], "medium_max": cfg["congestion_medium_max"]}},
                             vehicle_count=vehicle_count, evidence=jpeg)
                         self.outbox.put(event, f"{cfg['bus_id']}:{self.camera_id}:congestion:{level}", cfg["congestion_cooldown_seconds"],
-                                        spatial_radius_m=cfg.get("congestion_radius_m",30), spatial_ttl_seconds=cfg.get("congestion_location_cooldown_seconds",120))
+                                        spatial_radius_m=cfg.get("congestion_radius_m", 30), spatial_ttl_seconds=cfg.get("congestion_location_cooldown_seconds", 120))
                     for rule_event in rule_events:
-                        event = self.event(rule_event["event_type"],rule_event["severity"],source_frame/fps,source_frame,
-                                           rule_event["metadata"],evidence=jpeg)
+                        event = self.event(rule_event["event_type"], rule_event["severity"], source_frame / fps, source_frame,
+                                           rule_event["metadata"], evidence=jpeg)
                         if event is not None:
-                            event.update(track_id=rule_event["track_id"],vehicle_type=rule_event["vehicle_type"])
-                            self.outbox.put(event, f"violation:{cfg['bus_id']}:{self.camera_id}:{rules.settings.get('video_sha256')}:{rule_event['track_id']}",86400)
+                            event.update(track_id=rule_event["track_id"], vehicle_type=rule_event["vehicle_type"])
+                            self.outbox.put(event, f"violation:{cfg['bus_id']}:{self.camera_id}:{rules.settings.get('video_sha256')}:{rule_event['track_id']}", 86400)
                     if school and counts["person"]:
-                        event=self.event("SCHOOL_ZONE_PEDESTRIAN", "MEDIUM",source_frame/fps,source_frame,
-                            {"school":school,"person_count":counts["person"],"requires_review":True,
-                             "method":"GPS school proximity plus person detection; not age or speeding inference"},evidence=jpeg)
-                        self.outbox.put(event,f"school:{school['name']}",60,spatial_radius_m=100,spatial_ttl_seconds=300)
+                        event = self.event("SCHOOL_ZONE_PEDESTRIAN", "MEDIUM", source_frame / fps, source_frame,
+                            {"school": school, "person_count": counts["person"], "requires_review": True,
+                             "method": "GPS school proximity plus person detection; not age or speeding inference"}, evidence=jpeg)
+                        self.outbox.put(event, f"school:{school['name']}", 60, spatial_radius_m=100, spatial_ttl_seconds=300)
                 else:
                     grouped = {}
                     for box in boxes:
                         grouped.setdefault(box["class_name"], []).append(box)
                     for label, observations in grouped.items():
-                        if label.lower() not in cfg.get("road_event_classes",["pothole","crack","longitudinal_crack","transverse_crack","alligator_crack"]):
+                        allowed = cfg.get("road_event_classes",
+                                          ["pothole", "crack", "longitudinal_crack", "transverse_crack",
+                                           "alligator_crack", "patch", "other", "speed_bump", "unpaved_road"])
+                        if label.lower() not in allowed:
                             continue
-                        # A supported class is an observation, never an invented depth/size/damage claim.
-                        event = self.event("ROAD_OBSERVATION", "MEDIUM", source_frame/fps, source_frame,
+                        event = self.event("ROAD_OBSERVATION", "MEDIUM", source_frame / fps, source_frame,
                             {"class_name": label, "detections": observations,
                              "severity_basis": "prototype review priority; physical severity not estimated"},
                             confidence=max(b["confidence"] for b in observations), evidence=jpeg)
                         self.outbox.put(event, f"road:{label.lower()}", cfg["road_cooldown_seconds"],
-                                        spatial_radius_m=cfg.get("road_dedup_radius_m",15),spatial_ttl_seconds=cfg.get("road_dedup_seconds",86400))
+                                        spatial_radius_m=cfg.get("road_dedup_radius_m", 15),
+                                        spatial_ttl_seconds=cfg.get("road_dedup_seconds", 86400))
                 with self.lock:
                     self.jpeg, self.published_at = jpeg, now
                     self.sequence += 1
                     self.state.update(inference_ms=self.inference_ms, prediction_wall_ms=predict_ms,
-                        processed_fps=processed_fps, processing_latency_ms=(now-captured_at)*1000,
-                        playback_lag_ms=max(0, (now-playback_start)-(loop*duration+source_frame/fps))*1000,
-                        source_video_seconds=source_frame/fps, source_frame=source_frame,
-                        skipped_frames=max(0, absolute-last_absolute-1), loop=loop,
+                        processed_fps=processed_fps, processing_latency_ms=(now - captured_at) * 1000,
+                        playback_lag_ms=max(0, (now - playback_start) - (loop * duration + source_frame / fps)) * 1000,
+                        source_video_seconds=source_frame / fps, source_frame=source_frame,
+                        skipped_frames=max(0, absolute - last_absolute - 1), loop=loop,
                         vehicle_count=vehicle_count if self.kind == "traffic" else None,
                         counts=dict(counts), detection_count=len(boxes), detections=boxes,
                         congestion_level=level, average_vehicle_count=average,
@@ -330,7 +401,7 @@ class CameraWorker:
                         school_context=school, gps_source=self.frame_fix["source"], gps_error=self.frame_fix.get("error"),
                         updated_at=datetime.now(timezone.utc).isoformat())
                 last_absolute, last_loop = absolute, loop
-                self.stop.wait(max(0, 1/cfg["target_fps"] - (time.monotonic()-cycle)))
+                self.stop.wait(max(0, 1 / cfg["target_fps"] - (time.monotonic() - cycle)))
         except Exception as exc:
             LOG.exception("%s camera stopped", self.kind)
             with self.lock:
@@ -357,7 +428,7 @@ class EdgeRuntime:
             cv2.setNumThreads(1)
             torch.set_num_threads(self.config["cpu_threads"])
         except ImportError:
-            pass  # Workers publish the concrete dependency failure independently.
+            pass
         self.sync_thread.start()
         for worker in self.workers.values():
             worker.thread.start()

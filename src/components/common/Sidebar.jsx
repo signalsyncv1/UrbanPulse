@@ -156,7 +156,9 @@ export function Sidebar() {
               <span className="w-2 h-2 rounded-full bg-blue-600" />
               FLEET ACTIVE
             </span>
-            <span className="text-slate-900 font-bold">{buses.length || 127} Buses</span>
+                        <span className="text-slate-900 font-bold">
+              {buses.filter(b => b.edgeGps).length} live · 999 proj.
+            </span>
           </div>
           <div className="flex items-center justify-between text-slate-600">
             <span className="flex items-center gap-1.5">

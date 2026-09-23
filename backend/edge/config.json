@@ -5,11 +5,11 @@
   "cpu_threads": 4,
   "target_fps": 12,
   "imgsz": 416,
-  "confidence": 0.25,
-"school_context": {
-  "enabled": true,
-  "radius_m": 150
-},
+  "confidence": 0.2,
+  "school_context": {
+    "enabled": true,
+    "radius_m": 150
+  },
   "display_width": 960,
   "jpeg_quality": 75,
   "evidence": true,
@@ -20,12 +20,42 @@
   "congestion_cooldown_seconds": 30,
   "road_cooldown_seconds": 30,
   "route_duration_seconds": 120,
-  "prototype_route": [[13.0140,80.2235],[13.0144,80.2240],[13.0148,80.2246],[13.0152,80.2252],[13.0157,80.2258],[13.0162,80.2264]],
-  "road_model": "models/best.pt",
+  "prototype_route": [
+    [
+      13.014,
+      80.2235
+    ],
+    [
+      13.0144,
+      80.224
+    ],
+    [
+      13.0148,
+      80.2246
+    ],
+    [
+      13.0152,
+      80.2252
+    ],
+    [
+      13.0157,
+      80.2258
+    ],
+    [
+      13.0162,
+      80.2264
+    ]
+  ],
+  "road_model": "models/donor_best.pt",
+  "donor_road_model": null,
+  "donor_confidence": 0.12,
+  "road_event_classes": [
+    "speed_bump",
+    "pothole",
+    "unpaved_road"
+  ],
   "road_video": "videos/road.mp4",
   "traffic_model": "models/yolov8n.pt",
   "traffic_video": "videos/traffic.mp4",
-"track_trails": false
-
+  "track_trails": false
 }
-

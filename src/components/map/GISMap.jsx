@@ -2,8 +2,8 @@ import React, { useState } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, Circle } from 'react-leaflet';
 import { CHENNAI_CENTER, CHENNAI_DEFAULT_ZOOM } from '../../utils/geoUtils';
 import { createBusIcon, createDefectIcon } from './CustomMarkerIcons';
-import { CONGESTION_ZONES } from '../../data/edgeNodesData';
 import { useUrbanPulse } from '../../context/UrbanPulseContext';
+
 import { StatusBadge, SeverityBadge } from '../common/StatusBadge';
 import {
   ExternalLink,
@@ -80,7 +80,7 @@ export function GISMap({ height = '520px' }) {
   const showSchoolViolations = activeFilter === 'ALL' || activeFilter === 'SCHOOL_VIOLATIONS';
   const showIncidents = activeFilter === 'ALL' || activeFilter === 'INCIDENTS';
   const showCongestion = activeFilter === 'ALL' || activeFilter === 'CONGESTION';
-
+const showAnpr = activeFilter === 'ALL' || activeFilter === 'INCIDENTS';
   const visibleDetections = detections.filter(d => {
     if (!Number.isFinite(d.lat) || !Number.isFinite(d.lng)) return false;
     if (showCongestion && d.type === 'traffic_congestion') return true;
@@ -88,7 +88,8 @@ export function GISMap({ height = '520px' }) {
     if (showPotholes && ['pothole', 'road_damage', 'road_crack', 'road_patch', 'road_other'].includes(d.type)) return true;
     if (showWaterlogging && d.type === 'waterlogging') return true;
     if (showTrafficSignals && (d.type === 'damaged_signal' || d.type === 'damaged_signboard' || d.type === 'missing_zebra_crossing')) return true;
-    if (showSchoolViolations && d.type === 'school_zone_violation') return true;
+    //if (showSchoolViolations && d.type === 'school_zone_violation') return true;
+    if (showSchoolViolations && (d.type === 'school_zone_violation' || d.type === 'school_zone_pedestrian')) return true;
     if (showIncidents && ['hit_and_run', 'rash_driving', 'dangerous_overtaking', 'pedestrian_risk', 'red_light_violation', 'wrong_way_driving'].includes(d.type)) return true;
     return false;
   });
@@ -270,12 +271,15 @@ export function GISMap({ height = '520px' }) {
         <span>Maps Live Integration</span>
       </div>
 
-      <MapContainer
-        center={CHENNAI_CENTER}
-        zoom={CHENNAI_DEFAULT_ZOOM}
-        scrollWheelZoom={true}
-        style={{ height: '100%', width: '100%' }}
-      >
+      
+<MapContainer
+  key="urbanpulse-gis-map"
+  center={CHENNAI_CENTER}
+  zoom={CHENNAI_DEFAULT_ZOOM}
+  scrollWheelZoom={true}
+  style={{ height: '100%', width: '100%' }}
+  preferCanvas={true}
+>
         <TileLayer
           key={mapLayer}
           attribution={currentLayer.attribution}
@@ -344,109 +348,117 @@ export function GISMap({ height = '520px' }) {
             </React.Fragment>
           );
         })}
-
-        {/* 2. Congestion Zone Overlays */}
-        {showCongestion && CONGESTION_ZONES.map(zone => (
-          <Circle
-            key={zone.id}
-            center={[zone.lat, zone.lng]}
-            radius={650}
-            pathOptions={{
-              color: zone.color,
-              fillColor: zone.color,
-              fillOpacity: isHeatmapMode ? 0.35 : 0.22,
-              weight: 2,
-              dashArray: '4, 6'
-            }}
-          >
-            <Popup>
-              <div className="p-1 space-y-1 font-sans">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">
-                  SAMPLE CONGESTION ZONE
-                </span>
-                <h4 className="font-bold text-xs text-slate-900 mt-1">{zone.zone}</h4>
-                <p className="text-xs text-slate-600">Avg Corridor Speed: <strong className="text-slate-900">{zone.avgSpeedKmh} km/h</strong></p>
-                <p className="text-[11px] text-slate-500">{zone.bottleneckCause}</p>
-                <div className="text-[10px] font-mono text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-100">
-                  {zone.busCountActive} Fleet Buses Active
-                </div>
-                <div className="pt-1">
-                  <button
-                    onClick={() => openInGoogleMaps(zone.lat, zone.lng)}
-                    className="w-full py-1 px-2 rounded bg-slate-100 hover:bg-slate-200 text-[11px] font-bold text-slate-700 flex items-center justify-center gap-1"
-                  >
-                    <Navigation className="w-3 h-3 text-blue-600" />
-                    <span>View in Google Maps</span>
-                  </button>
-                </div>
-              </div>
-            </Popup>
-          </Circle>
-        ))}
-
-        {/* 3. Fleet Bus Live GPS Pins (Always visible) */}
-        {showBuses && buses.map(bus => (
-          <Marker
-            key={bus.id}
-            position={[bus.lat, bus.lng]}
-            icon={createBusIcon(bus.heading, bus.speed)}
-          >
-            <Popup>
-              <div className="p-1.5 space-y-2 font-sans min-w-[240px]">
-                <div className="flex items-center justify-between border-b border-slate-200 pb-1.5">
-                  <div className="flex items-center gap-1.5">
-                    <span className="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 font-mono font-bold text-xs border border-blue-200">
-                      {bus.id}
-                    </span>
-                    <span className="text-xs font-bold text-slate-900">{bus.regNo}</span>
-                  </div>
-                  <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200">
-                    {bus.edgeGps ? 'Speed not measured' : `${bus.speed} km/h · sample`}
+        {/* 2. Real Congestion Events (from edge AI) */}
+        {showCongestion && detections
+          .filter(d => d.type === 'traffic_congestion')
+          .map(d => (
+            <Circle
+              key={d.id}
+              center={[d.lat, d.lng]}
+              radius={150}
+              pathOptions={{
+                color: '#f59e0b',
+                fillColor: '#fbbf24',
+                fillOpacity: isHeatmapMode ? 0.35 : 0.22,
+                weight: 2,
+                dashArray: '4, 6',
+              }}
+            >
+              <Popup>
+                <div className="p-1 space-y-1 font-sans">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">
+                    LIVE CONGESTION — {d.congestionLevel || 'MEDIUM'}
                   </span>
+                  <div className="text-xs text-slate-700">
+                    <strong>Vehicles:</strong> {d.vehicleCount ?? '—'}
+                  </div>
+                  <div className="text-[11px] text-slate-500">
+                    Bus: {d.busId} · {d.cameraId}
+                  </div>
+                  <div className="text-[11px] text-slate-500">
+                    {new Date(d.timestamp).toLocaleTimeString()}
+                  </div>
                 </div>
-
-                <div className="text-xs space-y-1">
-                  <p className="text-slate-600 flex items-start gap-1">
-                    <Bus className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
-                    <span><strong>Route:</strong> {bus.route}</span>
-                  </p>
-                  <p className="text-slate-600 flex items-start gap-1">
-                    <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
-                    <span><strong>Location:</strong> {bus.currentLocation}</span>
-                  </p>
+              </Popup>
+            </Circle>
+          ))}
+        
+                {/* 3. LIVE Bus Only — Real Edge AI (BUS-104) with sensing radius */}
+        {showBuses && buses.filter(b => b.edgeGps).map(bus => {
+          return [
+            <Circle
+              key={`sense-${bus.id}`}
+              center={[bus.lat, bus.lng]}
+              radius={200}
+              pathOptions={{
+                color: '#3b82f6',
+                fillColor: '#3b82f6',
+                fillOpacity: 0.06,
+                weight: 1.5,
+                dashArray: '6, 4',
+              }}
+            />,
+            <Marker
+              key={`bus-${bus.id}`}
+              position={[bus.lat, bus.lng]}
+              icon={createBusIcon(bus.heading, bus.speed || 0)}
+            >
+              <Popup>
+                <div className="p-1.5 space-y-2 font-sans min-w-[240px]">
+                  <div className="flex items-center justify-between border-b border-slate-200 pb-1.5">
+                    <div className="flex items-center gap-1.5">
+                      <span className="px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 font-mono font-bold text-xs border border-emerald-200">
+                        {bus.id}
+                      </span>
+                      <span className="text-xs font-bold text-slate-900">{bus.regNo}</span>
+                    </div>
+                    <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200">
+                      ● LIVE
+                    </span>
+                  </div>
+                  <div className="text-xs space-y-1">
+                    <p className="text-slate-600 flex items-start gap-1">
+                      <Bus className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
+                      <span><strong>Route:</strong> {bus.route}</span>
+                    </p>
+                    <p className="text-slate-600 flex items-start gap-1">
+                      <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
+                      <span><strong>GPS:</strong> {bus.lat.toFixed(5)}, {bus.lng.toFixed(5)}</span>
+                    </p>
+                  </div>
+                  <div className="p-1.5 rounded bg-emerald-50 border border-emerald-200 text-[11px] font-mono">
+                    <span className="text-slate-600">Edge YOLO AI: </span>
+                    <span className="text-emerald-700 font-bold">
+                      {bus.gpsSource || 'SIMULATED_ROUTE'}
+                    </span>
+                    <br />
+                    <span className="text-slate-600">Sensing radius: </span>
+                    <span className="text-blue-700 font-bold">200 m</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5 pt-1">
+                    <button
+                      onClick={() => {
+                        setSelectedBus(bus);
+                        setActiveRoute('fleet');
+                      }}
+                      className="py-1.5 px-2 rounded-lg bg-blue-600 text-white text-xs font-bold hover:bg-blue-700 transition-colors flex items-center justify-center gap-1 shadow-xs"
+                    >
+                      <span>Inspect</span>
+                      <ArrowRight className="w-3 h-3" />
+                    </button>
+                    <button
+                      onClick={() => openInGoogleMaps(bus.lat, bus.lng)}
+                      className="py-1.5 px-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold transition-colors flex items-center justify-center gap-1 border border-slate-200"
+                    >
+                      <Navigation className="w-3 h-3 text-blue-600" />
+                      <span>Google Map</span>
+                    </button>
+                  </div>
                 </div>
-
-                <div className="p-1.5 rounded bg-slate-50 border border-slate-200 text-[11px] font-mono flex items-center justify-between">
-                  <span className="text-slate-500">Edge YOLO AI:</span>
-                  <span className="text-blue-600 font-bold">{bus.edgeGps ? `${bus.gpsSource} · ${bus.gpsStale ? 'STALE: last known position' : 'current fix'}` : 'Sample bus · FPS not measured'}</span>
-                </div>
-
-                <div className="grid grid-cols-2 gap-1.5 pt-1">
-                  <button
-                    onClick={() => {
-                      setSelectedBus(bus);
-                      setActiveRoute('fleet');
-                    }}
-                    className="py-1.5 px-2 rounded-lg bg-blue-600 text-white text-xs font-bold hover:bg-blue-700 transition-colors flex items-center justify-center gap-1 shadow-xs"
-                  >
-                    <span>Inspect</span>
-                    <ArrowRight className="w-3 h-3" />
-                  </button>
-
-                  <button
-                    onClick={() => openInGoogleMaps(bus.lat, bus.lng)}
-                    className="py-1.5 px-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold transition-colors flex items-center justify-center gap-1 border border-slate-200"
-                    title="Open exact bus coordinate in Google Maps"
-                  >
-                    <Navigation className="w-3 h-3 text-blue-600" />
-                    <span>Google Map</span>
-                  </button>
-                </div>
-              </div>
-            </Popup>
-          </Marker>
-        ))}
-
+              </Popup>
+            </Marker>,
+          ];
+        })}
         {/* 4. Discrete Detection Vector Markers (Visible in normal mode or when toggled) */}
         {!isHeatmapMode && visibleDetections.map(det => (
           <Marker
@@ -520,6 +532,54 @@ export function GISMap({ height = '520px' }) {
             </Popup>
           </Marker>
         ))}
+        {/* === DEMO SCHOOL ZONE (prototype route) === */}
+        <Circle
+          center={[13.0151, 80.2249]}
+          radius={150}
+          pathOptions={{
+            color: '#9333ea',
+            fillColor: '#a855f7',
+            fillOpacity: 0.15,
+            weight: 2,
+            dashArray: '6, 4',
+          }}
+        >
+          <Popup>
+            <div style={{ fontFamily: 'sans-serif', fontSize: 12 }}>
+              <strong>Demo Public School (Prototype Route)</strong>
+              <br />
+              School zone · 150 m radius
+              <br />
+              <span style={{ color: '#7e22ce' }}>
+                Pedestrian detection active
+              </span>
+            </div>
+          </Popup>
+        </Circle>
+
+        {/* === ANPR PLATE PINS === */}
+        {detections
+          .filter((d) => d.eventType === 'ANPR_DETECTION')
+          .map((d) => (
+            <Marker key={d.id} position={[d.lat, d.lng]}>
+              <Popup>
+                <div style={{ fontFamily: 'sans-serif', fontSize: 12 }}>
+                  <strong style={{ color: '#dc2626' }}>
+                    ANPR DETECTION
+                  </strong>
+                  <br />
+                  Plate: <strong>{d.metadata?.plate || 'N/A'}</strong>
+                  <br />
+                  Confidence:{' '}
+                  {((d.metadata?.plate_confidence || 0) * 100).toFixed(0)}%
+                  <br />
+                  Bus: {d.busId}
+                  <br />
+                  Time: {new Date(d.timestamp).toLocaleTimeString()}
+                </div>
+              </Popup>
+            </Marker>
+          ))}
       </MapContainer>
     </div>
   );
