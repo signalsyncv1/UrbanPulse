@@ -1,4 +1,4 @@
-# UrbanPulse — SIH 26124
+# UrbanPulse
 
 **AI-Powered Mobile Urban Intelligence Platform Using Public Transport Fleet**
 
