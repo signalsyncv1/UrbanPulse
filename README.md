@@ -58,7 +58,13 @@ Open **http://127.0.0.1:5173** in your browser.
 - **Frontend:** React, Vite, Tailwind, Leaflet
 
 ---
+
+## Prototype Snapshot 
+
 <img width="1911" height="861" alt="Dashboard" src="https://github.com/user-attachments/assets/156e4cb6-4bee-4c17-ba31-398c02792aac" />
 
 <img width="803" height="733" alt="Notification" src="https://github.com/user-attachments/assets/f73f5028-1732-456b-896d-c16dd88f1f19" />
 
+## Demo Video
+
+<video src="https://github.com/user-attachments/assets/963ab2b0-fec2-423a-ac20-fd2fc5690bae" controls></video>
