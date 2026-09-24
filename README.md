@@ -67,4 +67,4 @@ Open **http://127.0.0.1:5173** in your browser.
 
 ## Demo Video
 
-<video src="https://github.com/user-attachments/assets/https://github.com/user-attachments/assets/bbedce01-b2c8-43ea-9c87-d7fb852fe0eb" controls width="800"></video>
+https://github.com/signalsyncv1/UrbanPulse/issues/1
