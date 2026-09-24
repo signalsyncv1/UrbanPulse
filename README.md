@@ -61,9 +61,5 @@ PITCH_SCRIPT.md — 7-min demo script
 
 START_HERE.md — setup guide
 
-License
-Prototype for SIH 2026.'''
-
-text
-
-Save.
+## License
+Prototype for SIH 2026.
