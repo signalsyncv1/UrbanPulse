@@ -67,5 +67,4 @@ Open **http://127.0.0.1:5173** in your browser.
 
 ## Demo Video
 
-<video src="https://github.com/user-attachments/assets/1b2cd7d9-88ef-43b0-a8f3-5f2e1461b20e" controls width="800"></video>
-
+<video src="https://github.com/user-attachments/assets/YOUR-WORKING-URL-HERE" controls width="800"></video>
