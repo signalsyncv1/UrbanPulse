@@ -17,7 +17,7 @@ UrbanPulse turns moving vehicles into mobile sensing units. It processes camera 
 ## How It Works
 
 ```
-Bus Camera → Edge AI (YOLOv8n) → Structured Event → Central API → Dashboard
+Bus Camera → Edge AI → Structured Event → Central API → Dashboard
 ```
 
 Video never leaves the bus. Only small JSON events (~1.2 KB each) are sent to the central system.
@@ -53,7 +53,7 @@ Open **http://127.0.0.1:5173** in your browser.
 
 ## Tech Stack
 
-- **Edge AI:** YOLOv8n, OpenCV, ByteTrack
+- **Edge AI:** YOLO, OpenCV, ByteTrack
 - **Backend:** FastAPI, SQLite
 - **Frontend:** React, Vite, Tailwind, Leaflet
 
